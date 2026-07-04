@@ -1,36 +1,42 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Trace
 
-## Getting Started
+**The why layer for code.** Trace explains why code exists — not what it does — by reconstructing intent from commits, pull requests, and linked issues. Every claim cites its evidence; "insufficient evidence" is an honest first-class answer.
 
-First, run the development server:
+Docs: [PRD.md](./PRD.md) · [TECHNICAL_DESIGN.md](./TECHNICAL_DESIGN.md)
+
+## Status
+
+Milestone 1 (skeleton): GitHub OAuth sign-in, public-repo ingest (bare clone + merged-PR fetch + commit↔PR mapping), why-signal scoring, live status UI. Region-based "why?" queries are Milestone 2–3.
+
+## Stack
+
+TypeScript · Next.js (App Router) · Postgres (Drizzle) · Auth.js (GitHub OAuth, JWT sessions) · system `git` · single Docker container on Railway.
+
+## Development
+
+Prereqs: Node 20+, `git` on PATH, a Postgres URL (Railway dev database works fine — no local Postgres needed).
+
+1. Create a GitHub OAuth app at <https://github.com/settings/developers>:
+   - Homepage: `http://localhost:3000`
+   - Callback: `http://localhost:3000/api/auth/callback/github`
+2. `cp .env.example .env.local` and fill in `DATABASE_URL`, `AUTH_SECRET` (`openssl rand -base64 32`), `AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET`.
+3. Apply migrations, then run:
 
 ```bash
+npx drizzle-kit migrate
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Deploy (Railway)
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+1. New project → **Deploy from GitHub repo** (Railway builds the `Dockerfile` automatically).
+2. Add a **Postgres** service; reference its `DATABASE_URL` in the app service.
+3. Add a **volume** mounted at `/data` (bare-clone cache; safe to wipe — clones are re-created on demand).
+4. Set env vars: `AUTH_SECRET`, `AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET` (a second GitHub OAuth app with the production callback URL: `https://<app>.up.railway.app/api/auth/callback/github`).
+5. Migrations run automatically on boot.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Security posture (MVP)
 
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- GitHub OAuth with **no scopes** — identity + public reads only, on the user's own rate limit. Tokens live in the encrypted session cookie, never in the database.
+- `git` runs via `spawn` with `shell:false`, an allowlisted subcommand set, and `--` separators; clones are bare (nothing checked out, nothing executed).
+- Repo content is an ephemeral cache on the volume — never long-term storage.
