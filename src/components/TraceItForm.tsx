@@ -35,8 +35,10 @@ export function TraceItForm({ authed, login }: Props) {
         const body = await res.json();
         if (!res.ok) {
           setError(body.error ?? "Something went wrong");
+          setBusy(false);
           return;
         }
+        // Deliberately stay busy through the redirect to the status page.
         router.push(`/repos/${body.id}`);
       } catch {
         setError("Network error — try again");
