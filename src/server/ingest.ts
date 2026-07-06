@@ -23,7 +23,7 @@ export function ensureRunning(repo: typeof schema.repos.$inferSelect, token: str
 
   running.add(repo.id);
   perUser.set(userId, (perUser.get(userId) ?? 0) + 1);
-  void ingest(repo.id, token)
+  void runIngest(repo.id, token)
     .catch(async (err) => {
       const message = err instanceof Error ? err.message : String(err);
       await db()
@@ -46,7 +46,8 @@ async function setStatus(repoId: number, patch: Partial<typeof schema.repos.$inf
     .where(eq(schema.repos.id, repoId));
 }
 
-async function ingest(repoId: number, token: string) {
+/** The full ingest sequence. Exported for the CLI harness; the web layer goes through ensureRunning. */
+export async function runIngest(repoId: number, token: string) {
   const repo = await db().query.repos.findFirst({ where: eq(schema.repos.id, repoId) });
   if (!repo) return;
 

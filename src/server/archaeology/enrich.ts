@@ -4,14 +4,23 @@ import { getIssue } from "@/server/github";
 import type { EvidenceCommit, EvidenceIssue, EvidencePr } from "./types";
 import { MAX_ISSUES_PER_QUERY } from "./types";
 
-// "fixes #12", "closes: #34", "resolved #56" — the conventional issue links.
-const ISSUE_REF = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+#(\d+)/gi;
+// "fixes #12", "fix for #34", "closes: #56", "issue #78" — and number lists
+// ("fix #66 #73"). Only the matched keyword span is scanned for numbers, so
+// bare "#N" elsewhere in prose is not treated as a reference.
+const ISSUE_REF =
+  /(?:close[sd]?|fix(?:e[sd])?(?:\s+for)?|resolve[sd]?|issue|see):?\s+(#\d+(?:[,\s]+(?:and\s+)?#\d+)*)/gi;
 // Squash-merge suffix on commit subjects: "feat: retry loop (#123)".
 const SUBJECT_PR_REF = /\(#(\d+)\)\s*$/;
+// Merge-commit workflow: "Merge pull request #123 from ...". The API's
+// merge_commit_sha is unreliable on old PRs (it can point at a test-merge
+// commit that never entered the branch), so the subject is the real signal.
+const MERGE_SUBJECT_PR_REF = /^Merge pull request #(\d+)\b/;
 
 function extractIssueRefs(text: string): number[] {
   const refs = new Set<number>();
-  for (const m of text.matchAll(ISSUE_REF)) refs.add(Number(m[1]));
+  for (const m of text.matchAll(ISSUE_REF)) {
+    for (const n of m[1].matchAll(/#(\d+)/g)) refs.add(Number(n[1]));
+  }
   return [...refs];
 }
 
@@ -42,7 +51,8 @@ export async function enrich(
   const prNumbers = new Set<number>();
   for (const c of commits) {
     const fromMap = bySha.get(c.sha);
-    const fromSubject = SUBJECT_PR_REF.exec(c.subject)?.[1];
+    const fromSubject =
+      SUBJECT_PR_REF.exec(c.subject)?.[1] ?? MERGE_SUBJECT_PR_REF.exec(c.subject)?.[1];
     const pr = fromMap ?? (fromSubject ? Number(fromSubject) : null);
     if (pr !== null) {
       c.prNumber = pr;
