@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { PublicRepo } from "@/server/dto";
+import { AskWhy } from "./AskWhy";
 import { SignalBadge, StatusBadge } from "./badges";
 
 const ACTIVE = new Set(["queued", "cloning", "fetching_prs", "scoring"]);
@@ -76,11 +77,12 @@ export function RepoStatusView({ initial }: { initial: PublicRepo }) {
             </p>
           )}
           <p className="mt-4 border-t border-zinc-800 pt-3 text-sm text-zinc-500">
-            {repo.prCount.toLocaleString()} merged PRs ingested. Region-based “why?” queries land
-            in the next milestone.
+            {repo.prCount.toLocaleString()} merged PRs ingested.
           </p>
         </div>
       )}
+
+      {repo.status === "ready" && <AskWhy repoId={repo.id} />}
     </div>
   );
 }
