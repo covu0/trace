@@ -8,7 +8,23 @@ import { validateAnswer } from "./validate";
 export { INSUFFICIENT_MESSAGE } from "./schema";
 export type { ExplainResult, Claim, TimelineEntry } from "./schema";
 
-const MODEL = () => process.env.TRACE_MODEL ?? "claude-opus-4-8";
+// Default path (founder-approved 2026-07-06): Sonnet 4.6, thinking off,
+// output-capped prompt — 35.7s / ~$0.08 vs 84s / ~$0.25 on Opus adaptive,
+// with narrative parity on the eval region. Opus stays one env flip away;
+// the A/B on truthfulness happens on feedback data once it accumulates.
+const MODEL = () => process.env.TRACE_MODEL ?? "claude-sonnet-4-6";
+
+/** Cost per query in USD from actual token usage. Prices per MTok. */
+const PRICING: Array<{ match: RegExp; inPerM: number; outPerM: number }> = [
+  { match: /opus/, inPerM: 5, outPerM: 25 },
+  { match: /sonnet/, inPerM: 3, outPerM: 15 },
+  { match: /haiku/, inPerM: 1, outPerM: 5 },
+];
+
+export function costUsd(model: string, usage: { inputTokens: number; outputTokens: number }): number {
+  const p = PRICING.find((x) => x.match.test(model)) ?? PRICING[1];
+  return (usage.inputTokens * p.inPerM + usage.outputTokens * p.outPerM) / 1_000_000;
+}
 
 let _client: Anthropic | null = null;
 function client() {
@@ -33,9 +49,9 @@ export async function explainRegion(bundle: EvidenceBundle): Promise<ExplainResu
   const response = await client().messages.create({
     model: MODEL(),
     max_tokens: 16000,
-    // TRACE_THINKING=off trades reasoning depth for latency — measured, not
-    // assumed: see the M4 latency experiments before changing the default.
-    thinking: process.env.TRACE_THINKING === "off" ? { type: "disabled" } : { type: "adaptive" },
+    // Thinking off by default (latency: it burned 20-25s invisibly in the M4
+    // experiments). TRACE_THINKING=adaptive re-enables for quality A/Bs.
+    thinking: process.env.TRACE_THINKING === "adaptive" ? { type: "adaptive" } : { type: "disabled" },
     system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
     messages: [{ role: "user", content: renderEvidence(bundle) }],
     output_config: {

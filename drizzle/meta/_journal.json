@@ -15,6 +15,13 @@
       "when": 1783360838772,
       "tag": "0001_issues_cache",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1783375720056,
+      "tag": "0002_queries_feedback",
+      "breakpoints": true
     }
   ]
 }

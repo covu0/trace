@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { EvidenceQuality } from "@/server/archaeology/types";
 
 type SlimCommit = {
@@ -13,22 +13,22 @@ type SlimCommit = {
   isIntroduction: boolean;
 };
 type SlimRef = { number: number; title: string; url: string };
+type Evidence = { commits: SlimCommit[]; prs: SlimRef[]; issues: SlimRef[] };
 type Citation = { type: "commit" | "pr" | "issue"; ref: string };
 type Claim = { text: string; kind: "explicit" | "inferred"; citations: Citation[] };
+type Counts = { commits: number; prs: number; issues: number };
 
-type ExplainResponse = {
-  quality: EvidenceQuality;
-  result:
-    | {
-        kind: "answer";
-        verdict: Claim;
-        claims: Claim[];
-        timeline: { evidence: Citation; summary: string }[];
-        dropped: { claims: number; timeline: number; citations: number };
-      }
-    | { kind: "insufficient"; message: string; gated: boolean };
-  evidence: { commits: SlimCommit[]; prs: SlimRef[]; issues: SlimRef[] };
-};
+type Result =
+  | {
+      kind: "answer";
+      verdict: Claim;
+      claims: Claim[];
+      timeline: { evidence: Citation; summary: string }[];
+      dropped: { claims: number; timeline: number; citations: number };
+    }
+  | { kind: "insufficient"; message: string; gated: boolean };
+
+type Stage = "idle" | "evidence" | "narrating" | "done";
 
 const BADGE_STYLES: Record<string, string> = {
   rich: "border-emerald-700 bg-emerald-950/60 text-emerald-200",
@@ -38,8 +38,8 @@ const BADGE_STYLES: Record<string, string> = {
 
 /**
  * The evidence-quality banner. Deliberately the FIRST and largest thing in
- * every answer: the reader learns how much to trust the answer before they
- * read a word of it. Reasons render verbatim from the engine.
+ * every answer — and it renders as soon as the evidence phase returns, before
+ * the narrative exists. Reasons render verbatim from the engine.
  */
 function QualityBanner({ quality }: { quality: EvidenceQuality }) {
   return (
@@ -63,7 +63,7 @@ function QualityBanner({ quality }: { quality: EvidenceQuality }) {
   );
 }
 
-function citationHref(c: Citation, ev: ExplainResponse["evidence"]): string | null {
+function citationHref(c: Citation, ev: Evidence): string | null {
   if (c.type === "commit") {
     return ev.commits.find((x) => x.sha.startsWith(c.ref.toLowerCase()))?.url ?? null;
   }
@@ -76,7 +76,7 @@ function citationLabel(c: Citation): string {
   return `${c.type === "pr" ? "PR" : "issue"} #${c.ref.replace(/^#/, "")}`;
 }
 
-function CitationChips({ citations, evidence }: { citations: Citation[]; evidence: ExplainResponse["evidence"] }) {
+function CitationChips({ citations, evidence }: { citations: Citation[]; evidence: Evidence }) {
   return (
     <span className="ml-2 inline-flex flex-wrap gap-1 align-middle">
       {citations.map((c, i) => {
@@ -102,34 +102,140 @@ function CitationChips({ citations, evidence }: { citations: Citation[]; evidenc
   );
 }
 
+function FeedbackButtons({ queryId }: { queryId: number }) {
+  const [sent, setSent] = useState<"up" | "down" | null>(null);
+
+  async function send(rating: "up" | "down") {
+    setSent(rating); // optimistic; a failed write is not worth interrupting the reader
+    await fetch("/api/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ queryId, rating }),
+    }).catch(() => {});
+  }
+
+  return (
+    <div className="flex items-center gap-3 text-sm text-zinc-500">
+      <span>Was this answer accurate?</span>
+      <button
+        onClick={() => send("up")}
+        className={`rounded border px-2 py-1 ${sent === "up" ? "border-emerald-600 text-emerald-400" : "border-zinc-700 hover:bg-zinc-800"}`}
+        aria-label="Accurate"
+      >
+        👍
+      </button>
+      <button
+        onClick={() => send("down")}
+        className={`rounded border px-2 py-1 ${sent === "down" ? "border-red-700 text-red-400" : "border-zinc-700 hover:bg-zinc-800"}`}
+        aria-label="Inaccurate"
+      >
+        👎
+      </button>
+      {sent && <span className="text-zinc-600">thanks — this trains what we fix next</span>}
+    </div>
+  );
+}
+
+function Progress({ stage, counts, seconds }: { stage: Stage; counts: Counts | null; seconds: number }) {
+  return (
+    <div className="flex items-center gap-3 rounded-lg border border-zinc-800 p-4 text-sm text-zinc-400">
+      <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-zinc-300" />
+      {stage === "evidence" && <span>Excavating region history — commits, pull requests, issues…</span>}
+      {stage === "narrating" && counts && (
+        <span>
+          Reconstructing intent from {counts.commits} commits · {counts.prs} PRs · {counts.issues}{" "}
+          issues — every sentence will be checked against this evidence ({seconds}s)
+        </span>
+      )}
+    </div>
+  );
+}
+
 export function AskWhy({ repoId }: { repoId: number }) {
   const [path, setPath] = useState("");
   const [startLine, setStartLine] = useState("1");
   const [endLine, setEndLine] = useState("40");
-  const [busy, setBusy] = useState(false);
+  const [stage, setStage] = useState<Stage>("idle");
   const [error, setError] = useState<string | null>(null);
-  const [data, setData] = useState<ExplainResponse | null>(null);
+  const [quality, setQuality] = useState<EvidenceQuality | null>(null);
+  const [counts, setCounts] = useState<Counts | null>(null);
+  const [result, setResult] = useState<Result | null>(null);
+  const [evidence, setEvidence] = useState<Evidence | null>(null);
+  const [queryId, setQueryId] = useState<number | null>(null);
+  const [seconds, setSeconds] = useState(0);
+  const runId = useRef(0);
+
+  useEffect(() => {
+    if (stage !== "narrating") return;
+    setSeconds(0);
+    const t = setInterval(() => setSeconds((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [stage]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    setBusy(true);
+    const run = ++runId.current;
+    setStage("evidence");
     setError(null);
-    setData(null);
+    setQuality(null);
+    setCounts(null);
+    setResult(null);
+    setEvidence(null);
+    setQueryId(null);
+
+    const body = { path, startLine: Number(startLine), endLine: Number(endLine) };
     try {
-      const res = await fetch(`/api/repos/${repoId}/explain`, {
+      // Phase 1: fast — evidence + quality. Insufficient regions end here.
+      const res1 = await fetch(`/api/repos/${repoId}/explain`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path, startLine: Number(startLine), endLine: Number(endLine) }),
+        body: JSON.stringify({ ...body, phase: "evidence" }),
       });
-      const body = await res.json();
-      if (!res.ok) setError(body.error ?? "Something went wrong");
-      else setData(body);
+      const p1 = await res1.json();
+      if (run !== runId.current) return;
+      if (!res1.ok) {
+        setError(p1.error ?? "Something went wrong");
+        setStage("idle");
+        return;
+      }
+      setQuality(p1.quality);
+      if (p1.result) {
+        // Gated insufficient: done, no narrative phase.
+        setResult(p1.result);
+        setEvidence(p1.evidence);
+        setQueryId(p1.queryId ?? null);
+        setStage("done");
+        return;
+      }
+      setCounts(p1.counts);
+      setStage("narrating");
+
+      // Phase 2: the narrative.
+      const res2 = await fetch(`/api/repos/${repoId}/explain`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...body, phase: "answer" }),
+      });
+      const p2 = await res2.json();
+      if (run !== runId.current) return;
+      if (!res2.ok) {
+        setError(p2.error ?? "Something went wrong");
+        setStage("idle");
+        return;
+      }
+      setQuality(p2.quality);
+      setResult(p2.result);
+      setEvidence(p2.evidence);
+      setQueryId(p2.queryId ?? null);
+      setStage("done");
     } catch {
+      if (run !== runId.current) return;
       setError("Network error — try again");
-    } finally {
-      setBusy(false);
+      setStage("idle");
     }
   }
+
+  const busy = stage === "evidence" || stage === "narrating";
 
   return (
     <div className="mt-6 space-y-4">
@@ -179,18 +285,19 @@ export function AskWhy({ repoId }: { repoId: number }) {
       </form>
       {error && <p className="text-sm text-red-400">{error}</p>}
 
-      {data && (
-        <div className="space-y-4">
-          <QualityBanner quality={data.quality} />
+      {quality && <QualityBanner quality={quality} />}
+      {busy && <Progress stage={stage} counts={counts} seconds={seconds} />}
 
-          {data.result.kind === "insufficient" ? (
+      {stage === "done" && result && evidence && (
+        <div className="space-y-4">
+          {result.kind === "insufficient" ? (
             <div className="rounded-lg border border-zinc-700 p-5">
-              <p className="text-lg text-zinc-200">{data.result.message}</p>
+              <p className="text-lg text-zinc-200">{result.message}</p>
               <p className="mt-1 text-sm text-zinc-500">
                 Trace does not invent history. Here is everything the record holds for this region:
               </p>
               <ul className="mt-3 space-y-1 font-mono text-sm text-zinc-400">
-                {data.evidence.commits.map((c) => (
+                {evidence.commits.map((c) => (
                   <li key={c.sha}>
                     <a href={c.url} target="_blank" rel="noreferrer" className="hover:text-zinc-200">
                       {c.shortSha} {c.date.slice(0, 10)} {c.subject}
@@ -201,26 +308,26 @@ export function AskWhy({ repoId }: { repoId: number }) {
               </ul>
             </div>
           ) : (
-            <div className="space-y-4">
+            <>
               <div className="rounded-lg border border-zinc-800 p-5">
                 <p className="text-lg text-zinc-100">
-                  {data.result.verdict.text}
-                  <CitationChips citations={data.result.verdict.citations} evidence={data.evidence} />
+                  {result.verdict.text}
+                  <CitationChips citations={result.verdict.citations} evidence={evidence} />
                 </p>
               </div>
 
-              {data.result.timeline.length > 0 && (
+              {result.timeline.length > 0 && (
                 <div className="rounded-lg border border-zinc-800 p-5">
                   <h3 className="mb-3 text-xs font-medium uppercase tracking-wide text-zinc-500">
                     Evolution
                   </h3>
                   <ol className="space-y-2 text-sm text-zinc-300">
-                    {data.result.timeline.map((t, i) => (
+                    {result.timeline.map((t, i) => (
                       <li key={i} className="flex gap-2">
                         <span className="text-zinc-600">{i + 1}.</span>
                         <span>
                           {t.summary}
-                          <CitationChips citations={[t.evidence]} evidence={data.evidence} />
+                          <CitationChips citations={[t.evidence]} evidence={evidence} />
                         </span>
                       </li>
                     ))}
@@ -228,35 +335,40 @@ export function AskWhy({ repoId }: { repoId: number }) {
                 </div>
               )}
 
-              {data.result.claims.length > 0 && (
+              {result.claims.length > 0 && (
                 <div className="rounded-lg border border-zinc-800 p-5">
                   <h3 className="mb-3 text-xs font-medium uppercase tracking-wide text-zinc-500">
                     The story, sentence by sentence
                   </h3>
                   <ul className="space-y-2 text-sm text-zinc-300">
-                    {data.result.claims.map((c, i) => (
+                    {result.claims.map((c, i) => (
                       <li key={i}>
                         {c.kind === "inferred" && (
-                          <span className="mr-1 rounded bg-zinc-800 px-1 text-xs text-zinc-500" title="Deduced from diffs/timing, not stated in the evidence">
+                          <span
+                            className="mr-1 rounded bg-zinc-800 px-1 text-xs text-zinc-500"
+                            title="Deduced from diffs/timing, not stated in the evidence"
+                          >
                             inferred
                           </span>
                         )}
                         {c.text}
-                        <CitationChips citations={c.citations} evidence={data.evidence} />
+                        <CitationChips citations={c.citations} evidence={evidence} />
                       </li>
                     ))}
                   </ul>
                 </div>
               )}
 
-              {data.result.dropped.claims + data.result.dropped.timeline > 0 && (
+              {result.dropped.claims + result.dropped.timeline > 0 && (
                 <p className="text-xs text-zinc-600">
-                  {data.result.dropped.claims + data.result.dropped.timeline} unverifiable statement
-                  {data.result.dropped.claims + data.result.dropped.timeline === 1 ? "" : "s"} were
-                  removed by the citation validator.
+                  {result.dropped.claims + result.dropped.timeline} unverifiable statement
+                  {result.dropped.claims + result.dropped.timeline === 1 ? "" : "s"} were removed by
+                  the citation validator.
                 </p>
               )}
-            </div>
+
+              {queryId !== null && <FeedbackButtons queryId={queryId} />}
+            </>
           )}
         </div>
       )}

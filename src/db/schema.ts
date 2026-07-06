@@ -1,5 +1,7 @@
 import {
   bigint,
+  doublePrecision,
+  index,
   integer,
   jsonb,
   pgTable,
@@ -77,6 +79,49 @@ export const pullRequests = pgTable(
   },
   (t) => [primaryKey({ columns: [t.repoId, t.number] })],
 );
+
+export type QueryOutcome = "answer" | "insufficient_gated" | "insufficient_model";
+
+// One row per completed why-query — the instrumentation that replaces the
+// pre-build eval set (founder decision): region, tier, cost, latency, drops.
+export const queries = pgTable(
+  "queries",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    repoId: integer("repo_id")
+      .notNull()
+      .references(() => repos.id, { onDelete: "cascade" }),
+    userId: bigint("user_id", { mode: "number" })
+      .notNull()
+      .references(() => users.id),
+    path: text("path").notNull(),
+    startLine: integer("start_line").notNull(),
+    endLine: integer("end_line").notNull(),
+    qualityLabel: text("quality_label").notNull(),
+    informativeUnits: integer("informative_units").notNull(),
+    outcome: text("outcome").$type<QueryOutcome>().notNull(),
+    model: text("model"),
+    inputTokens: integer("input_tokens"),
+    outputTokens: integer("output_tokens"),
+    costUsd: doublePrecision("cost_usd"),
+    latencyMs: integer("latency_ms").notNull(),
+    droppedClaims: integer("dropped_claims").notNull().default(0),
+    droppedTimeline: integer("dropped_timeline").notNull().default(0),
+    droppedCitations: integer("dropped_citations").notNull().default(0),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [index("queries_user_created_idx").on(t.userId, t.createdAt)],
+);
+
+// One rating per query (the query is already per-user). This corpus is what
+// lets us A/B models on truthfulness instead of eyeballing narratives.
+export const feedback = pgTable("feedback", {
+  queryId: integer("query_id")
+    .primaryKey()
+    .references(() => queries.id, { onDelete: "cascade" }),
+  rating: integer("rating").notNull(), // 1 = up, -1 = down
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
 
 // Issues are fetched lazily at query time (ingesting all of them up front
 // would waste rate limit on issues nobody asks about) and cached here.
