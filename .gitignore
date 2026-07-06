@@ -43,3 +43,7 @@ next-env.d.ts
 # repo clone cache
 data/
 
+
+# .env* above must not swallow the template
+!.env.example
+
