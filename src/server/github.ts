@@ -12,7 +12,8 @@ export class GitHubError extends Error {
 async function gh<T>(token: string, path: string): Promise<{ data: T; linkNext: boolean }> {
   const res = await fetch(`${API}${path}`, {
     headers: {
-      Authorization: `Bearer ${token}`,
+      // Empty token → unauthenticated (60 req/hr) — used by the CLI harness.
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       Accept: "application/vnd.github+json",
       "X-GitHub-Api-Version": "2022-11-28",
     },
@@ -58,6 +59,35 @@ export async function getRepo(token: string, owner: string, name: string): Promi
     sizeKb: data.size,
     defaultBranch: data.default_branch,
   };
+}
+
+export type IssueInfo = {
+  number: number;
+  title: string;
+  body: string | null;
+  isPull: boolean;
+};
+
+/** Fetch a single issue (or PR — GitHub shares the number space). Null on 404. */
+export async function getIssue(
+  token: string,
+  owner: string,
+  name: string,
+  number: number,
+): Promise<IssueInfo | null> {
+  type I = { number: number; title: string; body: string | null; pull_request?: unknown };
+  try {
+    const { data } = await gh<I>(token, `/repos/${owner}/${name}/issues/${number}`);
+    return {
+      number: data.number,
+      title: data.title,
+      body: data.body,
+      isPull: data.pull_request !== undefined,
+    };
+  } catch (err) {
+    if (err instanceof GitHubError && (err.status === 404 || err.status === 410)) return null;
+    throw err;
+  }
 }
 
 export type MergedPr = {

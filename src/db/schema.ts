@@ -78,6 +78,24 @@ export const pullRequests = pgTable(
   (t) => [primaryKey({ columns: [t.repoId, t.number] })],
 );
 
+// Issues are fetched lazily at query time (ingesting all of them up front
+// would waste rate limit on issues nobody asks about) and cached here.
+export const issuesCache = pgTable(
+  "issues_cache",
+  {
+    repoId: integer("repo_id")
+      .notNull()
+      .references(() => repos.id, { onDelete: "cascade" }),
+    number: integer("number").notNull(),
+    title: text("title").notNull(),
+    body: text("body"),
+    // GitHub issues and PRs share a number space; refs can point at either.
+    isPull: integer("is_pull").notNull().default(0),
+    fetchedAt: timestamp("fetched_at").notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.repoId, t.number] })],
+);
+
 export const commitPrMap = pgTable(
   "commit_pr_map",
   {

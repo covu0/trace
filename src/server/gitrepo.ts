@@ -115,6 +115,90 @@ export async function logSample(repoId: number, limit: number): Promise<CommitMe
     });
 }
 
+// Repo-relative path validation for user-supplied file paths. Conservative on
+// purpose: printable, no "..", no leading "-" or "/", no control chars.
+const SAFE_PATH = /^(?!\/)(?!-)[\x20-\x7E]+$/;
+
+export function isSafeRepoPath(p: string): boolean {
+  return (
+    SAFE_PATH.test(p) &&
+    !p.includes("..") &&
+    p.length <= 500 &&
+    !p.split("/").some((seg) => seg.startsWith("-"))
+  );
+}
+
+export async function fileExistsAtHead(repoId: number, path: string): Promise<boolean> {
+  if (!isSafeRepoPath(path)) return false;
+  try {
+    await runGit(["cat-file", "-e", `HEAD:${path}`], { cwd: cloneDir(repoId) });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const BODY_END = "\x02"; // separates %b from the patch text that follows it
+
+export type RegionCommit = {
+  sha: string;
+  author: string;
+  date: string; // ISO 8601
+  subject: string;
+  body: string;
+  patch: string;
+};
+
+/**
+ * Line-range history via `git log -L` — the archaeology primitive. Follows
+ * renames, walks first-parent, newest first. Throws GitError with git's
+ * message when the range is invalid for the file.
+ */
+export async function regionLog(
+  repoId: number,
+  path: string,
+  startLine: number,
+  endLine: number,
+): Promise<RegionCommit[]> {
+  if (!isSafeRepoPath(path)) throw new Error(`unsafe path: ${path}`);
+  if (
+    !Number.isInteger(startLine) ||
+    !Number.isInteger(endLine) ||
+    startLine < 1 ||
+    endLine < startLine
+  ) {
+    throw new Error(`invalid line range: ${startLine},${endLine}`);
+  }
+  const out = await runGit(
+    [
+      "log",
+      "--first-parent",
+      `-L${startLine},${endLine}:${path}`,
+      `--format=%x1e%H${FIELD_SEP}%an${FIELD_SEP}%aI${FIELD_SEP}%s${FIELD_SEP}%b${BODY_END}`,
+    ],
+    { cwd: cloneDir(repoId), timeoutMs: 300_000 },
+  );
+  return out
+    .split("\x1e")
+    .map((r) => r.trim())
+    .filter(Boolean)
+    .map((record) => {
+      const bodyEnd = record.indexOf(BODY_END);
+      const header = bodyEnd === -1 ? record : record.slice(0, bodyEnd);
+      const patch = bodyEnd === -1 ? "" : record.slice(bodyEnd + 1).trim();
+      const [sha, author, date, subject, body] = header.split(FIELD_SEP);
+      return {
+        sha: sha ?? "",
+        author: author ?? "",
+        date: date ?? "",
+        subject: subject ?? "",
+        body: (body ?? "").trim(),
+        patch,
+      };
+    })
+    .filter((c) => /^[0-9a-f]{40}$/.test(c.sha));
+}
+
 /** Detects an "initial commit dump": history begins with one huge import commit. */
 export async function rootCommitFileCount(repoId: number): Promise<number> {
   const cwd = cloneDir(repoId);
