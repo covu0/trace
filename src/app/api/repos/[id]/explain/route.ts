@@ -1,10 +1,15 @@
-import { and, count, eq, gte, inArray } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
 import { db, schema } from "@/db";
 import { buildEvidenceBundle, type EvidenceBundle } from "@/server/archaeology";
-import { costUsd, explainRegion, INSUFFICIENT_MESSAGE } from "@/server/explain";
+import {
+  costUsd,
+  explainRegion,
+  INSUFFICIENT_MESSAGE,
+  NarrationUnavailableError,
+} from "@/server/explain";
+import { checkDailyCaps } from "@/server/limits";
 
 const Body = z.object({
   path: z.string().min(1).max(500),
@@ -16,8 +21,6 @@ const Body = z.object({
   //   "answer"  — rebuild the bundle and run the narrative pipeline.
   phase: z.enum(["evidence", "answer"]),
 });
-
-const DAILY_CAP = () => Number(process.env.TRACE_DAILY_QUERY_CAP ?? 50);
 
 function slimEvidence(bundle: EvidenceBundle) {
   return {
@@ -97,27 +100,23 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     });
   }
 
-  // phase === "answer": enforce the daily LLM spend cap, then narrate.
-  const dayStart = new Date();
-  dayStart.setUTCHours(0, 0, 0, 0);
-  const [{ value: usedToday }] = await db()
-    .select({ value: count() })
-    .from(schema.queries)
-    .where(
-      and(
-        eq(schema.queries.userId, session.githubId),
-        gte(schema.queries.createdAt, dayStart),
-        inArray(schema.queries.outcome, ["answer", "insufficient_model"]),
-      ),
-    );
-  if (usedToday >= DAILY_CAP()) {
-    return NextResponse.json(
-      { error: `Daily query limit reached (${DAILY_CAP()}). Resets at midnight UTC.` },
-      { status: 429 },
-    );
+  // phase === "answer": enforce per-user AND global daily spend caps, then narrate.
+  const caps = await checkDailyCaps(session.githubId);
+  if (!caps.allowed) {
+    return NextResponse.json({ error: caps.error }, { status: caps.status });
   }
 
-  const result = await explainRegion(bundle);
+  let result;
+  try {
+    result = await explainRegion(bundle);
+  } catch (err) {
+    // Fail safe on narration outages (exhausted credit, overload, auth):
+    // clean 503 with a user-safe message, never a crash or a stack trace.
+    if (err instanceof NarrationUnavailableError) {
+      return NextResponse.json({ error: err.message }, { status: 503 });
+    }
+    throw err;
+  }
   const latencyMs = Date.now() - started;
 
   const queryId =

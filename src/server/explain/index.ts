@@ -29,8 +29,23 @@ export function costUsd(model: string, usage: { inputTokens: number; outputToken
 let _client: Anthropic | null = null;
 function client() {
   if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY is not set");
-  _client ??= new Anthropic();
+  // maxRetries 2 (SDK default, made explicit): only transient errors
+  // (429/5xx) are retried — failed requests are not billed, and hard
+  // failures like exhausted credit (400) or bad keys (401) are never retried.
+  _client ??= new Anthropic({ maxRetries: 2 });
   return _client;
+}
+
+/**
+ * Fail-safe wrapper for narration outages: exhausted Anthropic credit, rate
+ * limits, overload, auth problems. Carries a user-safe message; the real
+ * cause is logged server-side only.
+ */
+export class NarrationUnavailableError extends Error {
+  constructor() {
+    super("Narration is temporarily unavailable — your evidence is unaffected; try again shortly.");
+    this.name = "NarrationUnavailableError";
+  }
 }
 
 /**
@@ -46,7 +61,9 @@ export async function explainRegion(bundle: EvidenceBundle): Promise<ExplainResu
     return { kind: "insufficient", message: INSUFFICIENT_MESSAGE, gated: true };
   }
 
-  const response = await client().messages.create({
+  let response;
+  try {
+    response = await client().messages.create({
     model: MODEL(),
     max_tokens: 16000,
     // Thinking off by default (latency: it burned 20-25s invisibly in the M4
@@ -54,13 +71,22 @@ export async function explainRegion(bundle: EvidenceBundle): Promise<ExplainResu
     thinking: process.env.TRACE_THINKING === "adaptive" ? { type: "adaptive" } : { type: "disabled" },
     system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
     messages: [{ role: "user", content: renderEvidence(bundle) }],
-    output_config: {
-      // "medium" halves thinking depth vs the default "high" — latency lever;
-      // revisit against feedback data if narrative quality measurably drops.
-      effort: "medium",
-      format: { type: "json_schema", schema: ANSWER_JSON_SCHEMA as unknown as Record<string, unknown> },
-    },
-  });
+      output_config: {
+        // "medium" halves thinking depth vs the default "high" — latency
+        // lever; revisit against feedback data if quality measurably drops.
+        effort: "medium",
+        format: { type: "json_schema", schema: ANSWER_JSON_SCHEMA as unknown as Record<string, unknown> },
+      },
+    });
+  } catch (err) {
+    if (err instanceof Anthropic.APIError) {
+      // Exhausted credit surfaces as a 400; bad key 401; overload 429/529.
+      // All map to the same safe outage message — details stay in the log.
+      console.error(`[explain] Anthropic API error ${err.status}: ${err.message}`);
+      throw new NarrationUnavailableError();
+    }
+    throw err;
+  }
 
   const text = response.content.find((b) => b.type === "text")?.text;
   if (!text) throw new Error(`model returned no text block (stop: ${response.stop_reason})`);
