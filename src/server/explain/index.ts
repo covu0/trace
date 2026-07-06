@@ -33,10 +33,15 @@ export async function explainRegion(bundle: EvidenceBundle): Promise<ExplainResu
   const response = await client().messages.create({
     model: MODEL(),
     max_tokens: 16000,
-    thinking: { type: "adaptive" },
+    // TRACE_THINKING=off trades reasoning depth for latency — measured, not
+    // assumed: see the M4 latency experiments before changing the default.
+    thinking: process.env.TRACE_THINKING === "off" ? { type: "disabled" } : { type: "adaptive" },
     system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
     messages: [{ role: "user", content: renderEvidence(bundle) }],
     output_config: {
+      // "medium" halves thinking depth vs the default "high" — latency lever;
+      // revisit against feedback data if narrative quality measurably drops.
+      effort: "medium",
       format: { type: "json_schema", schema: ANSWER_JSON_SCHEMA as unknown as Record<string, unknown> },
     },
   });

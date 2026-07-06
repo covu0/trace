@@ -81,5 +81,8 @@ export type DeclinedRegion = {
 
 export const MAX_REGION_LINES = 400;
 export const MAX_EVIDENCE_COMMITS = 25; // introduction + 24 most recent
-export const MAX_PATCH_CHARS = 4000;
+// Patches are the token bulk of a bundle (they dominated input cost ~4:1 in
+// the first live run). 1200 chars keeps the hunk's shape visible for
+// inference while cutting input tokens roughly 3x on patch-heavy bundles.
+export const MAX_PATCH_CHARS = 1200;
 export const MAX_ISSUES_PER_QUERY = 8;
