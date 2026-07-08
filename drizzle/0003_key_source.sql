@@ -1,0 +1,1 @@
+ALTER TABLE "queries" ADD COLUMN "key_source" text DEFAULT 'house' NOT NULL;

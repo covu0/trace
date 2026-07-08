@@ -9,7 +9,7 @@ import {
   INSUFFICIENT_MESSAGE,
   NarrationUnavailableError,
 } from "@/server/explain";
-import { checkDailyCaps } from "@/server/limits";
+import { checkDailyCaps, FREE_CAP, freeQueriesUsed } from "@/server/limits";
 
 const Body = z.object({
   path: z.string().min(1).max(500),
@@ -100,15 +100,31 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     });
   }
 
-  // phase === "answer": enforce per-user AND global daily spend caps, then narrate.
-  const caps = await checkDailyCaps(session.githubId);
-  if (!caps.allowed) {
-    return NextResponse.json({ error: caps.error }, { status: caps.status });
+  // phase === "answer". BYOK (user's own Anthropic key, sent per-request from
+  // their browser, never stored or logged here) bypasses the free trial and
+  // our caps — their spend, their limits. House-key queries walk the gates.
+  const byokKey = req.headers.get("x-anthropic-key")?.trim() || null;
+
+  if (!byokKey) {
+    const used = await freeQueriesUsed(session.githubId);
+    if (used >= FREE_CAP()) {
+      return NextResponse.json(
+        {
+          error: `You've used your ${FREE_CAP()} free traces. Add your own Anthropic API key to keep going — it stays in your browser, we never store it.`,
+          freeTrialExhausted: true,
+        },
+        { status: 402 },
+      );
+    }
+    const caps = await checkDailyCaps(session.githubId);
+    if (!caps.allowed) {
+      return NextResponse.json({ error: caps.error }, { status: caps.status });
+    }
   }
 
   let result;
   try {
-    result = await explainRegion(bundle);
+    result = await explainRegion(bundle, byokKey ? { apiKey: byokKey } : {});
   } catch (err) {
     // Fail safe on narration outages (exhausted credit, overload, auth):
     // clean 503 with a user-safe message, never a crash or a stack trace.
@@ -119,11 +135,13 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   }
   const latencyMs = Date.now() - started;
 
+  const keySource = byokKey ? ("byok" as const) : ("house" as const);
   const queryId =
     result.kind === "answer"
       ? await logQuery({
           ...base,
           outcome: "answer",
+          keySource,
           model: result.model,
           inputTokens: result.usage.inputTokens,
           outputTokens: result.usage.outputTokens,
@@ -133,7 +151,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
           droppedTimeline: result.dropped.timeline,
           droppedCitations: result.dropped.citations,
         })
-      : await logQuery({ ...base, outcome: "insufficient_model", latencyMs });
+      : await logQuery({ ...base, outcome: "insufficient_model", keySource, latencyMs });
 
   return NextResponse.json({
     phase,

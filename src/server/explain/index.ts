@@ -39,14 +39,28 @@ function client() {
 /**
  * Fail-safe wrapper for narration outages: exhausted Anthropic credit, rate
  * limits, overload, auth problems. Carries a user-safe message; the real
- * cause is logged server-side only.
+ * cause is logged server-side only. BYOK auth failures get an actionable
+ * message since the fix is in the user's hands.
  */
 export class NarrationUnavailableError extends Error {
-  constructor() {
-    super("Narration is temporarily unavailable — your evidence is unaffected; try again shortly.");
+  constructor(kind: "outage" | "byok_auth" = "outage") {
+    super(
+      kind === "byok_auth"
+        ? "Your Anthropic API key was rejected — check it and try again."
+        : "Narration is temporarily unavailable — your evidence is unaffected; try again shortly.",
+    );
     this.name = "NarrationUnavailableError";
   }
 }
+
+export type ExplainOptions = {
+  /**
+   * Bring-your-own-key: when set, this key authenticates the Anthropic call
+   * instead of the house key. Used for the request only — never cached,
+   * never stored, never logged.
+   */
+  apiKey?: string;
+};
 
 /**
  * Evidence bundle → validated answer.
@@ -56,14 +70,20 @@ export class NarrationUnavailableError extends Error {
  * model does not get a chance to narrate thin evidence. This ordering is a
  * product invariant, not an optimization.
  */
-export async function explainRegion(bundle: EvidenceBundle): Promise<ExplainResult> {
+export async function explainRegion(
+  bundle: EvidenceBundle,
+  opts: ExplainOptions = {},
+): Promise<ExplainResult> {
   if (bundle.quality.insufficient) {
     return { kind: "insufficient", message: INSUFFICIENT_MESSAGE, gated: true };
   }
 
+  const byok = !!opts.apiKey;
+  const anthropic = byok ? new Anthropic({ apiKey: opts.apiKey, maxRetries: 2 }) : client();
+
   let response;
   try {
-    response = await client().messages.create({
+    response = await anthropic.messages.create({
     model: MODEL(),
     max_tokens: 16000,
     // Thinking off by default (latency: it burned 20-25s invisibly in the M4
@@ -81,9 +101,9 @@ export async function explainRegion(bundle: EvidenceBundle): Promise<ExplainResu
   } catch (err) {
     if (err instanceof Anthropic.APIError) {
       // Exhausted credit surfaces as a 400; bad key 401; overload 429/529.
-      // All map to the same safe outage message — details stay in the log.
-      console.error(`[explain] Anthropic API error ${err.status}: ${err.message}`);
-      throw new NarrationUnavailableError();
+      // Log the cause (never the key), return a safe message.
+      console.error(`[explain] Anthropic API error ${err.status} (byok=${byok}): ${err.message}`);
+      throw new NarrationUnavailableError(byok && err.status === 401 ? "byok_auth" : "outage");
     }
     throw err;
   }

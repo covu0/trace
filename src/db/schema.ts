@@ -100,6 +100,9 @@ export const queries = pgTable(
     qualityLabel: text("quality_label").notNull(),
     informativeUnits: integer("informative_units").notNull(),
     outcome: text("outcome").$type<QueryOutcome>().notNull(),
+    // "house" = our key paid for it (counts toward free trial + caps);
+    // "byok" = the user's own key (never our spend, never capped by us).
+    keySource: text("key_source").$type<"house" | "byok">().notNull().default("house"),
     model: text("model"),
     inputTokens: integer("input_tokens"),
     outputTokens: integer("output_tokens"),

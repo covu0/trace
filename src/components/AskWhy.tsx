@@ -151,10 +151,63 @@ function Progress({ stage, counts, seconds }: { stage: Stage; counts: Counts | n
   );
 }
 
+const BYOK_STORAGE_KEY = "trace:anthropic-key";
+
+/**
+ * Free-trial meter + bring-your-own-key entry. The key lives in
+ * localStorage only — sent per-request to our explain endpoint (which
+ * forwards it to Anthropic and never stores or logs it).
+ */
+function KeyPanel({ onSave }: { onSave: (key: string) => void }) {
+  const [value, setValue] = useState("");
+  return (
+    <div className="rounded-lg border border-amber-700 bg-amber-950/40 p-4">
+      <p className="text-sm text-amber-200">
+        You&apos;ve used your 3 free traces. Add your own Anthropic API key to keep going — it
+        stays in your browser, we never store it.
+      </p>
+      <p className="mt-1 text-xs text-amber-200/70">
+        Get a key at{" "}
+        <a
+          href="https://console.anthropic.com"
+          target="_blank"
+          rel="noreferrer"
+          className="underline"
+        >
+          console.anthropic.com
+        </a>
+        . Queries with your key bill your Anthropic account and skip Trace&apos;s limits.
+      </p>
+      <form
+        className="mt-3 flex gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (value.trim()) onSave(value.trim());
+        }}
+      >
+        <input
+          type="password"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="sk-ant-…"
+          className="flex-1 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 font-mono text-sm"
+          autoComplete="off"
+        />
+        <button className="rounded-lg bg-zinc-100 px-4 py-2 text-sm font-medium text-zinc-900 hover:bg-white">
+          Save key
+        </button>
+      </form>
+    </div>
+  );
+}
+
 export function AskWhy({ repoId }: { repoId: number }) {
   const [path, setPath] = useState("");
   const [startLine, setStartLine] = useState("1");
   const [endLine, setEndLine] = useState("40");
+  const [byok, setByok] = useState<string | null>(null);
+  const [free, setFree] = useState<{ used: number; cap: number } | null>(null);
+  const [upsell, setUpsell] = useState(false);
   const [stage, setStage] = useState<Stage>("idle");
   const [error, setError] = useState<string | null>(null);
   const [quality, setQuality] = useState<EvidenceQuality | null>(null);
@@ -164,6 +217,26 @@ export function AskWhy({ repoId }: { repoId: number }) {
   const [queryId, setQueryId] = useState<number | null>(null);
   const [seconds, setSeconds] = useState(0);
   const runId = useRef(0);
+
+  useEffect(() => {
+    setByok(localStorage.getItem(BYOK_STORAGE_KEY));
+    fetch("/api/usage")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((u) => u && setFree({ used: u.freeUsed, cap: u.freeCap }))
+      .catch(() => {});
+  }, []);
+
+  function saveKey(key: string) {
+    localStorage.setItem(BYOK_STORAGE_KEY, key);
+    setByok(key);
+    setUpsell(false);
+    setError(null);
+  }
+
+  function removeKey() {
+    localStorage.removeItem(BYOK_STORAGE_KEY);
+    setByok(null);
+  }
 
   useEffect(() => {
     if (stage !== "narrating") return;
@@ -210,19 +283,28 @@ export function AskWhy({ repoId }: { repoId: number }) {
       setCounts(p1.counts);
       setStage("narrating");
 
-      // Phase 2: the narrative.
+      // Phase 2: the narrative. BYOK rides along per-request, never stored.
       const res2 = await fetch(`/api/repos/${repoId}/explain`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(byok ? { "x-anthropic-key": byok } : {}),
+        },
         body: JSON.stringify({ ...body, phase: "answer" }),
       });
       const p2 = await res2.json();
       if (run !== runId.current) return;
+      if (res2.status === 402) {
+        setUpsell(true);
+        setStage("idle");
+        return;
+      }
       if (!res2.ok) {
         setError(p2.error ?? "Something went wrong");
         setStage("idle");
         return;
       }
+      if (!byok) setFree((f) => (f ? { ...f, used: f.used + 1 } : f));
       setQuality(p2.quality);
       setResult(p2.result);
       setEvidence(p2.evidence);
@@ -239,9 +321,26 @@ export function AskWhy({ repoId }: { repoId: number }) {
 
   return (
     <div className="mt-6 space-y-4">
-      <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
-        Why does this code exist?
-      </h2>
+      <div className="flex items-baseline justify-between">
+        <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
+          Why does this code exist?
+        </h2>
+        <span className="text-xs text-zinc-500">
+          {byok ? (
+            <>
+              using your API key ·{" "}
+              <button onClick={removeKey} className="underline hover:text-zinc-300">
+                remove
+              </button>
+            </>
+          ) : free ? (
+            `${Math.max(0, free.cap - free.used)} of ${free.cap} free traces left`
+          ) : null}
+        </span>
+      </div>
+
+      {!byok && (upsell || (free && free.used >= free.cap)) && <KeyPanel onSave={saveKey} />}
+
       <form onSubmit={submit} className="flex flex-wrap items-end gap-2">
         <label className="flex-1">
           <span className="mb-1 block text-xs text-zinc-500">file path</span>
