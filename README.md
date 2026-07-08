@@ -1,42 +1,41 @@
 # Trace
 
-**The why layer for code.** Trace explains why code exists — not what it does — by reconstructing intent from commits, pull requests, and linked issues. Every claim cites its evidence; "insufficient evidence" is an honest first-class answer.
+**The why layer for code.** Trace explains why code exists — not what it does — by reconstructing intent from commits, pull requests, and linked issues. Paste a public GitHub repo, select a region of code, ask why.
 
-Docs: [PRD.md](./PRD.md) · [TECHNICAL_DESIGN.md](./TECHNICAL_DESIGN.md)
+## The honesty gate
 
-## Status
+Trace's core property is that it cannot make things up:
 
-Milestone 1 (skeleton): GitHub OAuth sign-in, public-repo ingest (bare clone + merged-PR fetch + commit↔PR mapping), why-signal scoring, live status UI. Region-based "why?" queries are Milestone 2–3.
+- **Deterministic evidence-quality gate.** Every region's evidence is rated `rich / partial / poor` by code, not by the model. A `poor` region returns the literal *"Not enough evidence to answer confidently"* — the LLM is never invoked for it.
+- **Citation validator.** The narrative is generated as sentence-level claims, each citing commits/PRs/issues. After generation, every citation is resolved against the actual evidence bundle; any sentence whose citations don't resolve is **dropped, not softened**. A hallucinated reference structurally cannot reach the screen.
+- **Visible confidence.** The evidence-quality banner (with the engine's reasons, verbatim) renders before the narrative; inferred claims are tagged; validator drops are disclosed.
 
-## Stack
+## Run locally
 
-TypeScript · Next.js (App Router) · Postgres (Drizzle) · Auth.js (GitHub OAuth, JWT sessions) · system `git` · single Docker container on Railway.
+Prereqs: Node 20+, git, a Postgres database, a GitHub OAuth app (callback `http://localhost:3000/api/auth/callback/github`), an Anthropic API key.
 
-## Development
-
-Prereqs: Node 20+, `git` on PATH, a Postgres URL (Railway dev database works fine — no local Postgres needed).
-
-1. Create a GitHub OAuth app at <https://github.com/settings/developers>:
-   - Homepage: `http://localhost:3000`
-   - Callback: `http://localhost:3000/api/auth/callback/github`
-2. `cp .env.example .env.local` and fill in `DATABASE_URL`, `AUTH_SECRET` (`openssl rand -base64 32`), `AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET`.
-3. Apply migrations, then run:
-
-```bash
+```sh
+npm install
+cp .env.example .env.local   # fill in all values
 npx drizzle-kit migrate
-npm run dev
+npm run dev                  # http://localhost:3000
 ```
 
-## Deploy (Railway)
+Sign in with GitHub, paste a public repo URL (≤150 MB), wait for ingest, then ask "why" about any file region.
 
-1. New project → **Deploy from GitHub repo** (Railway builds the `Dockerfile` automatically).
-2. Add a **Postgres** service; reference its `DATABASE_URL` in the app service.
-3. Add a **volume** mounted at `/data` (bare-clone cache; safe to wipe — clones are re-created on demand).
-4. Set env vars: `AUTH_SECRET`, `AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET` (a second GitHub OAuth app with the production callback URL: `https://<app>.up.railway.app/api/auth/callback/github`).
-5. Migrations run automatically on boot.
+### CLI harnesses (no web UI needed)
 
-## Security posture (MVP)
+```sh
+npx tsx scripts/ingest.ts owner/repo            # ingest a repo
+npx tsx scripts/archaeology.ts 1 src/index.ts 1 40   # evidence bundle + quality
+npx tsx scripts/explain.ts 1 src/index.ts 1 40       # full cited narrative
+npx tsx scripts/test-caps.ts                    # spend-cap boundary tests
+```
 
-- GitHub OAuth with **no scopes** — identity + public reads only, on the user's own rate limit. Tokens live in the encrypted session cookie, never in the database.
-- `git` runs via `spawn` with `shell:false`, an allowlisted subcommand set, and `--` separators; clones are bare (nothing checked out, nothing executed).
-- Repo content is an ephemeral cache on the volume — never long-term storage.
+## Spend protection
+
+Per-user (`TRACE_DAILY_QUERY_CAP`, default 50) and global (`TRACE_GLOBAL_DAILY_QUERY_CAP`, default 100) daily caps on LLM-invoking queries; zero-token outcomes don't count. Narration outages degrade to a clean 503, never a retry storm.
+
+## Docs
+
+[PRD.md](./PRD.md) · [TECHNICAL_DESIGN.md](./TECHNICAL_DESIGN.md) · [BACKLOG.md](./BACKLOG.md)
