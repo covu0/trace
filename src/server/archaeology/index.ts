@@ -1,5 +1,7 @@
+import { existsSync } from "node:fs";
 import { eq } from "drizzle-orm";
 import { db, schema } from "@/db";
+import { bareClone, cloneDir } from "@/server/gitrepo";
 import { collectRegionCommits, type RegionInput } from "./region";
 import { enrich } from "./enrich";
 import { rateEvidence } from "./quality";
@@ -20,6 +22,12 @@ export async function buildEvidenceBundle(
   const repo = await db().query.repos.findFirst({ where: eq(schema.repos.id, input.repoId) });
   if (!repo || repo.status !== "ready") {
     return { declined: true, reason: "Repository is not ingested yet." };
+  }
+
+  // Clones are an ephemeral cache (fresh volume, eviction, new instance) —
+  // a missing clone for a ready repo is re-created transparently.
+  if (!existsSync(cloneDir(repo.id))) {
+    await bareClone(repo.id, repo.owner, repo.name, repo.defaultBranch);
   }
 
   const collected = await collectRegionCommits(input, { owner: repo.owner, name: repo.name });
